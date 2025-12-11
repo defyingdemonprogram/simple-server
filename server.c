@@ -6,6 +6,7 @@
 #include <sys/socket.h>
 #include <string.h>
 
+#include "logging.c"
 #define PORT 6969
 #define BUFFER_SIZE (4*1024)
 
@@ -24,7 +25,7 @@ void print_sockaddr(struct sockaddr_in *addr) {
     printf("    Port: %d\n", port);
 }
 
-void serve_file(int client_socket, const char *raw_path) {
+void serve_file(int client_socket, struct sockaddr_in *client_addr, const char *raw_path) {
     int is_root = strcmp(raw_path, "/") == 0;
 
     // Remove leading slash except for "/"
@@ -37,14 +38,13 @@ void serve_file(int client_socket, const char *raw_path) {
     if (strstr(path, "..")) {
         const char *bad = "HTTP/1.1 400 Bad Request\r\n\r\n";
         send(client_socket, bad, strlen(bad), 0);
+        log_request(client_addr, "GET", raw_path, 400);
         return;
     }
 
     char full_path[256];
     snprintf(full_path, sizeof(full_path), "./public/%s",
     is_root ? "index.html" : path);
-
-    printf("[INFO]: Serving file: %s\n", full_path);
 
     FILE *file = fopen(full_path, "r");
     if (!file) {
@@ -53,12 +53,20 @@ void serve_file(int client_socket, const char *raw_path) {
             "Content-Type: text/html\r\n\r\n"
             "<h1>404 - File Not Found</h1>";
         send(client_socket, not_found, strlen(not_found), 0);
+        log_request(client_addr, "GET", raw_path, 404);
         return;
     }
 
-    const char *header = 
+    char content_type[50];
+    if (strstr(path, ".css")) strcpy(content_type, "text/css");
+    else if (strstr(path, ".js")) strcpy(content_type, "application/javascrpt");
+    else if (strstr(path, ".png")) strcpy(content_type, "image/png");
+    else strcpy(content_type, "text/html"); // Default fallback
+
+    char header[200];
+    snprintf(header, sizeof(header),
         "HTTP/1.1 200 OK\r\n"
-        "Content-Type: text/html\r\n\r\n";
+        "Content-Type: %s\r\n\r\n", content_type);
 
     send(client_socket, header, strlen(header), 0);
 
@@ -69,6 +77,7 @@ void serve_file(int client_socket, const char *raw_path) {
     }
 
     fclose(file);
+    log_request(client_addr, "GET", raw_path, 200);
 }
 
 int main() {
@@ -123,13 +132,12 @@ int main() {
         char method[10], path[256];
         sscanf(buffer, "%9s %255s", method, path);
 
-        printf("Client %02d | Request: %s %s\n", client_socket, method, path);
-
         if (strcmp(method, "GET") == 0) {
-            serve_file(client_socket, path);
+            serve_file(client_socket, &client_addr, path);
         } else {
             const char *bad = "HTTP/1.1 405 Method Not Allowed\r\n\r\n";
             send(client_socket, bad, strlen(bad), 0);
+            log_request(&client_addr, method, path, 405);
         }
 
         close(client_socket);
