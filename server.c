@@ -1,91 +1,167 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <pthread.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <string.h>
+#include <ctype.h>
 
-#include "logging.c"
+#include "logging.h"
 #define PORT 6969
 #define BUFFER_SIZE (4*1024)
 
-void print_sockaddr(struct sockaddr_in *addr) {
-    char ip[INET_ADDRSTRLEN];
+typedef struct {
+    int socket;
+    struct sockaddr_in addr;
+} ClientInfo;
 
-    // Convert the binary IP to string
-    inet_ntop(AF_INET, &(addr->sin_addr), ip, INET_ADDRSTRLEN);
-
-    // Convert port from network byte order to host byte order
-    int port = ntohs(addr->sin_port);
-
-    printf("sockaddr_in values:\n");
-    printf("    Family: AF_INET (%d)\n", addr->sin_family);
-    printf("    IP: %s\n", ip);
-    printf("    Port: %d\n", port);
+static int url_decode(char *dst, const char *src, size_t max) {
+    size_t i = 0, j = 0;
+    while (src[i] && j < max - 1) {
+        if (src[i] == '%' && isxdigit(src[i+1]) && isxdigit(src[i+2])) {
+            char hex[3] = {src[i+1], src[i+2], 0};
+            dst[j++] = strtol(hex, NULL, 16);
+            i += 3;
+        } else if (src[i] == '+') {
+            dst[j++] = ' ';
+            i++;
+        } else {
+            dst[j++] = src[i++];
+        }
+    }
+    dst[j] = 0;
+    return j;
 }
 
-void serve_file(int client_socket, struct sockaddr_in *client_addr, const char *raw_path) {
-    int is_root = strcmp(raw_path, "/") == 0;
+static int is_safe_path(const char *path) {
+    // Prevent "../", "/..", "....", anything containing ".."
+    return strstr(path, "..") == NULL;
+}
 
-    // Remove leading slash except for "/"
-    const char *path = raw_path;
-    if(path[0] == '/' && !is_root) {
-        path++;
+
+static const char *mime_type(const char *path) {
+    // get the last string after dot
+    const char *dot = strrchr(path, '.');
+    if (!dot) return "application/octet-stream";
+
+    if (strcmp(dot, ".html") == 0) return "text/html";
+    if (strcmp(dot, ".css") == 0) return "text/css";
+    if (strcmp(dot, ".js") == 0) return "application/javascript";
+    if (strcmp(dot, ".png") == 0) return "image/png";
+    if (strcmp(dot, ".jpg") == 0) return "image/jpeg";
+    if (strcmp(dot, ".jpeg") == 0) return "image/jpeg";
+
+    return "application/octet-stream";
+}
+
+static int send_all(int sock, const void *buf, size_t len) {
+    const char *p = buf;
+    size_t sent = 0;
+
+    while (sent < len) {
+        ssize_t n = send(sock, p + sent, len - sent, 0);
+        if (n <= 0) return -1; // error
+        sent += n;
     }
-    
+    return 0;
+}
+
+
+void serve_file(int client_socket, struct sockaddr_in *client_addr, const char *raw_path) {
+    char decoded[256];
+    url_decode(decoded, raw_path, sizeof(decoded));
+
+    // Normalize leading slashes
+    const char *path = decoded;
+    while (*path == '/') path++;
+ 
     // Prevent simple directory traversal
-    if (strstr(path, "..")) {
+    if (!is_safe_path(path)) {
         const char *bad = "HTTP/1.1 400 Bad Request\r\n\r\n";
-        send(client_socket, bad, strlen(bad), 0);
+        send_all(client_socket, bad, strlen(bad));
         log_request(client_addr, "GET", raw_path, 400);
         return;
     }
 
-    char full_path[256];
-    snprintf(full_path, sizeof(full_path), "./public/%s",
-    is_root ? "index.html" : path);
+    char full_path[512];
+    if (strcmp(raw_path, "/") == 0) {
+        snprintf(full_path, sizeof(full_path), "./public/index.html");
+    } else {
+        snprintf(full_path, sizeof(full_path), "./public/%s", path);
+    }
 
-    FILE *file = fopen(full_path, "r");
+    FILE *file = fopen(full_path, "rb");
     if (!file) {
         const char *not_found = 
             "HTTP/1.1 404 Not Found\r\n"
             "Content-Type: text/html\r\n\r\n"
             "<h1>404 - File Not Found</h1>";
-        send(client_socket, not_found, strlen(not_found), 0);
+        send_all(client_socket, not_found, strlen(not_found));
         log_request(client_addr, "GET", raw_path, 404);
         return;
     }
 
-    char content_type[50];
-    if (strstr(path, ".css")) strcpy(content_type, "text/css");
-    else if (strstr(path, ".js")) strcpy(content_type, "application/javascrpt");
-    else if (strstr(path, ".png")) strcpy(content_type, "image/png");
-    else strcpy(content_type, "text/html"); // Default fallback
+    // Determine MIME type
+    const char *mime = mime_type(full_path);
 
-    char header[200];
+    // Get file size
+    fseek(file, 0, SEEK_END);
+    long size = ftell(file);
+    rewind(file);
+
+    char header[256];
     snprintf(header, sizeof(header),
         "HTTP/1.1 200 OK\r\n"
-        "Content-Type: %s\r\n\r\n", content_type);
+        "Content-Type: %s\r\n"
+        "Content-Length: %ld\r\n\r\n",
+        mime, size);
 
-    send(client_socket, header, strlen(header), 0);
+    send_all(client_socket, header, strlen(header));
 
     char file_buffer[BUFFER_SIZE];
     size_t bytes;
     while((bytes = fread(file_buffer, 1, BUFFER_SIZE, file)) > 0) {
-        send(client_socket, file_buffer, bytes, 0);
+        if (send_all(client_socket, file_buffer, bytes) < 0) break;
     }
 
     fclose(file);
     log_request(client_addr, "GET", raw_path, 200);
 }
 
-int main() {
-    int server_fd, client_socket;
-    struct sockaddr_in server_addr, client_addr;
-    char buffer[BUFFER_SIZE];
+void *handle_client(void *arg) {
+    ClientInfo *cinfo = (ClientInfo *) arg;
+    int client_socket = cinfo->socket;
+    struct sockaddr_in client_addr = cinfo->addr;
 
-    server_fd = socket(AF_INET, SOCK_STREAM, 0);
+    char buffer[BUFFER_SIZE];
+    int bytes = recv(client_socket, buffer, BUFFER_SIZE - 1, 0);
+    if (bytes > 0) {
+        buffer[bytes] = '\0';
+
+        char method[10], path[256];
+        if (sscanf(buffer, "%9s %255s", method, path) != 2) {
+            const char *bad = "HTTP/1.1 400 Bad Request\r\n\r\n";
+            send_all(client_socket, bad, strlen(bad));
+            log_request(&client_addr, method, path, 400);
+        } else if (strcmp(method, "GET") == 0) {
+            serve_file(client_socket, &client_addr, path);
+        } else {
+            const char *bad = "HTTP/1.1 405 Method Not Allowed\r\n\r\n";
+            send_all(client_socket, bad, strlen(bad));
+            log_request(&client_addr, method, path, 405);
+        }
+    }
+
+    close(client_socket);
+    free(cinfo); // free memory allocated for client info
+    return NULL;
+}
+
+
+int main() {
+    int server_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (server_fd < 0) {
         perror("socket");
         return 1;
@@ -96,9 +172,11 @@ int main() {
     int opt = 1;
     setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_addr.s_addr = INADDR_ANY;
-    server_addr.sin_port = htons(PORT);
+    struct sockaddr_in server_addr = {
+        .sin_family = AF_INET,
+        .sin_addr.s_addr = INADDR_ANY,
+        .sin_port = htons(PORT)
+    };
 
     if (bind(server_fd, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
         perror("bind");
@@ -113,35 +191,28 @@ int main() {
     print_sockaddr(&server_addr);
     printf("Server running on http://localhost:%d\n", PORT);
     while (1) {
+        struct sockaddr_in client_addr;
         socklen_t client_len = sizeof(client_addr);
-        client_socket = accept(server_fd, (struct sockaddr *)&client_addr, &client_len);
+        int client_socket = accept(server_fd, (struct sockaddr *)&client_addr, &client_len);
 
         if (client_socket < 0) {
             perror("accept");
             continue;
         }
 
-        int bytes = read(client_socket, buffer, BUFFER_SIZE - 1);
-        if (bytes <= 0) {
+        // Allocate memory for client info
+        ClientInfo *cinfo = malloc(sizeof(ClientInfo));
+        cinfo->socket = client_socket;
+        cinfo->addr = client_addr;
+
+        pthread_t tid;
+        if (pthread_create(&tid, NULL, handle_client, cinfo) != 0) {
+            perror("pthread_create");
             close(client_socket);
+            free(cinfo);
             continue;
         }
-
-        buffer[bytes] = '\0';  // safe null-termination
-
-        char method[10], path[256];
-        sscanf(buffer, "%9s %255s", method, path);
-
-        if (strcmp(method, "GET") == 0) {
-            serve_file(client_socket, &client_addr, path);
-        } else {
-            const char *bad = "HTTP/1.1 405 Method Not Allowed\r\n\r\n";
-            send(client_socket, bad, strlen(bad), 0);
-            log_request(&client_addr, method, path, 405);
-        }
-
-        close(client_socket);
+        pthread_detach(tid); // Detach thread so resourxexs are freed automatically`
     }
-    
     return 0;
 }

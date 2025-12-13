@@ -1,4 +1,27 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+
 #include <time.h>
+#include "logging.h"
+
+void print_sockaddr(struct sockaddr_in *addr) {
+    char ip[INET_ADDRSTRLEN];
+
+    // Convert the binary IP to string
+    inet_ntop(AF_INET, &(addr->sin_addr), ip, INET_ADDRSTRLEN);
+
+    // Convert port from network byte order to host byte order
+    int port = ntohs(addr->sin_port);
+
+    printf("sockaddr_in values:\n");
+    printf("    Family: AF_INET (%d)\n", addr->sin_family);
+    printf("    IP: %s\n", ip);
+    printf("    Port: %d\n", port);
+}
 
 void log_request(struct sockaddr_in *client_addr, const char *method, const char *path, int status_code) {
     FILE *log_file = fopen("access.log", "a");
