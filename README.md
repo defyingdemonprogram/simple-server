@@ -44,6 +44,16 @@ Then navigate to [http://localhost:6969/test/](http://localhost:6969/test/) in y
 curl http://localhost:6969/test/
 ```
 
+### Benchmarking & Stress Testing
+
+To verify the Thread Pool implementation, you can simulate concurrent load using a shell loop or tools like `ab` (Apache Bench).
+
+**Simple Shell Stress Test:**
+```bash
+for i in {1..200}; do curl http://localhost:6969/ & done
+```
+You should see all requests completing successfully without "Connection refused" errors.
+
 ### References
 
 * [Network Socket – Wikipedia](https://en.wikipedia.org/wiki/Network_socket)

@@ -27,10 +27,33 @@ static long get_content_length(const char *headers) {
     return 0;
 }
 
+#define PORT 6969
+#define BUFFER_SIZE (4*1024)
+#define THREAD_POOL_SIZE 8
+#define QUEUE_SIZE 256
+
 typedef struct {
     int socket;
     struct sockaddr_in addr;
 } ClientInfo;
+
+typedef struct {
+    void (*function)(void *);
+    void *arg;
+} Task;
+
+Task task_queue[QUEUE_SIZE];
+int queue_head = 0;
+int queue_tail = 0;
+int queue_count = 0;
+
+pthread_mutex_t queue_lock;
+pthread_cond_t cond_not_empty;
+pthread_cond_t cond_not_full;
+
+void init_thread_pool();
+void submit_task(Task task);
+void *worker_thread(void *arg);
 
 static int should_close_connection(const char *req) {
     // Case-insensitive search
@@ -371,6 +394,9 @@ int main() {
 
     print_sockaddr(&server_addr);
     printf("Server running on http://localhost:%d\n", PORT);
+
+    init_thread_pool();
+
     while (1) {
         struct sockaddr_in client_addr;
         socklen_t client_len = sizeof(client_addr);
@@ -386,14 +412,63 @@ int main() {
         cinfo->socket = client_socket;
         cinfo->addr = client_addr;
 
-        pthread_t tid;
-        if (pthread_create(&tid, NULL, handle_client, cinfo) != 0) {
-            perror("pthread_create");
-            close(client_socket);
-            free(cinfo);
-            continue;
-        }
-        pthread_detach(tid); // Detach thread so resourxexs are freed automatically`
+        Task task;
+        task.function = (void (*)(void *))handle_client;
+        task.arg = cinfo;
+
+        submit_task(task);
     }
     return 0;
+}
+
+void init_thread_pool() {
+    pthread_mutex_init(&queue_lock, NULL);
+    pthread_cond_init(&cond_not_empty, NULL);
+    pthread_cond_init(&cond_not_full, NULL);
+
+    for (int i = 0; i < THREAD_POOL_SIZE; i++) {
+        pthread_t tid;
+        if (pthread_create(&tid, NULL, worker_thread, NULL) != 0) {
+            perror("pthread_create");
+        }
+        // No detach needed if we just let them run forever, but detach is cleaner if we had shutdown logic
+        pthread_detach(tid); 
+    }
+}
+
+void submit_task(Task task) {
+    pthread_mutex_lock(&queue_lock);
+    while (queue_count == QUEUE_SIZE) {
+        pthread_cond_wait(&cond_not_full, &queue_lock);
+    }
+    
+    task_queue[queue_tail] = task;
+    queue_tail = (queue_tail + 1) % QUEUE_SIZE;
+    queue_count++;
+    
+    pthread_cond_signal(&cond_not_empty);
+    pthread_mutex_unlock(&queue_lock);
+}
+
+void *worker_thread(void *arg) {
+    (void)arg; // Unused
+    while (1) {
+        Task task;
+        
+        pthread_mutex_lock(&queue_lock);
+        while (queue_count == 0) {
+            pthread_cond_wait(&cond_not_empty, &queue_lock);
+        }
+        
+        task = task_queue[queue_head];
+        queue_head = (queue_head + 1) % QUEUE_SIZE;
+        queue_count--;
+        
+        pthread_cond_signal(&cond_not_full);
+        pthread_mutex_unlock(&queue_lock);
+        
+        // Execute task
+        task.function(task.arg);
+    }
+    return NULL;
 }

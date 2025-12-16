@@ -87,3 +87,18 @@ To serve files or list directory contents, the server interacts with the operati
 
 #### Dynamic Content Generation
 When listing a directory, the server **dynamically generates** an HTML page. Instead of reading a static file from disk, it constructs a string containing the HTML structure (e.g., `<ul><li><a href="...">filename</a></li>...</ul>`) and sends that as the response body.
+
+### Concurrency & Thread Pool
+
+To handle multiple clients simultaneously, a server needs **concurrency**.
+-   **Threads vs. Processes**: Threads are lighter-weight than processes and share the same memory space, making data sharing easier (but requiring synchronization).
+-   **Race Conditions**: When multiple threads access shared resources (like a log file or a global variable), they might interfere with each other. **Mutexes** (Mutual Exclusion locks) are used to protect these critical sections.
+-   **Condition Variables**: These allow threads to sleep until a specific condition is met (e.g., "there is a task in the queue"). This avoids "busy-waiting" which wastes CPU.
+
+#### Thread Pool Pattern
+Creating a thread for every single request (`pthread_create` per client) is expensive. A **Thread Pool** is a pattern where:
+1.  A fixed number of worker threads are created at startup.
+2.  They wait for work in a shared **Queue**.
+3.  The main thread accepts connections and pushes them into the queue.
+4.  A worker wakes up, processes the request, and goes back to waiting.
+This limits the resource usage and provides predictable performance.
