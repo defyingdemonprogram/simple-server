@@ -51,3 +51,27 @@ setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 * `SOL_SOCKET` — socket-level options
 * `SO_REUSEADDR` — allows the socket to reuse the address (prevents "address already in use" errors)
 
+
+### HTTP Methods & POST Requests
+
+HTTP defines several methods (verb) that indicate the desired action to be performed on the identified resource.
+- **GET**: Requests a representation of the specified resource. Requests using GET should only retrieve data.
+- **POST**: Used to submit an entity to the specified resource, often causing a change in state or side effects on the server.
+
+#### Handling POST Requests
+When handling `POST` requests, the server must read data sent by the client (the **request body**). Unlike headers, which are terminated by `\r\n\r\n`, the body does not have a specific terminator. Instead, the `Content-Length` header specifies the number of bytes in the body.
+
+**Key Steps:**
+1.  **Parse Headers**: Look for `Content-Length`.
+2.  **Locate Body Start**: The body starts after the double CRLF (`\r\n\r\n`).
+3.  **Read Body**: Read exactly `Content-Length` bytes. Since TCP is a stream, the initial `read()` might contain only part of the body (or even just headers), so we may need to call `recv()` multiple times until we have the full body.
+
+```c
+// Example Logical Flow
+char *body_start = strstr(buffer, "\r\n\r\n") + 4;
+int body_len = atoi(get_header_value(buffer, "Content-Length"));
+int already_read = total_read - (body_start - buffer);
+int remaining = body_len - already_read;
+
+// recv loop for remaining bytes...
+```

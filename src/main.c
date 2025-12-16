@@ -12,6 +12,19 @@
 #define PORT 6969
 #define BUFFER_SIZE (4*1024)
 
+// Helper to get Content-Length case-insensitively
+static long get_content_length(const char *headers) {
+    const char *key = "Content-Length:";
+    const char *p = headers;
+    while (*p) {
+        if (strncasecmp(p, key, 15) == 0) {
+            return strtol(p + 15, NULL, 10);
+        }
+        p++;
+    }
+    return 0;
+}
+
 typedef struct {
     int socket;
     struct sockaddr_in addr;
@@ -147,6 +160,66 @@ void serve_file(int client_socket, struct sockaddr_in *client_addr, const char *
     log_request(client_addr, "GET", raw_path, 200);
 }
 
+void handle_post_request(int client_socket, struct sockaddr_in *client_addr, const char *path, char *buffer, int initial_len) {
+    // 1. Find end of headers
+    char *body_start = strstr(buffer, "\r\n\r\n");
+    if (!body_start) {
+        // Should practically not happen if we parsed method, but safest
+        return; 
+    }
+    body_start += 4; // Skip \r\n\r\n
+
+    // 2. Parse Content-Length
+    long content_len = get_content_length(buffer);
+    if (content_len <= 0) {
+        const char *resp = "HTTP/1.1 411 Length Required\r\nContent-Length: 0\r\n\r\n";
+        send_all(client_socket, resp, strlen(resp));
+        log_request(client_addr, "POST", path, 411);
+        return;
+    }
+
+    // 3. Read body
+    char *body = malloc(content_len + 1);
+    if (!body) {
+        perror("malloc");
+        return;
+    }
+
+    // Copy what we might have already read
+    int header_len = body_start - buffer;
+    int already_read = initial_len - header_len;
+    
+    if (already_read > 0) {
+        if (already_read > content_len) already_read = content_len; // Safety clamp
+        memcpy(body, body_start, already_read);
+    }
+
+    int total_body_read = already_read;
+    while (total_body_read < content_len) {
+        int left = content_len - total_body_read;
+        int n = recv(client_socket, body + total_body_read, left, 0);
+        if (n <= 0) break;
+        total_body_read += n;
+    }
+    body[total_body_read] = '\0';
+
+    // 4. Process Body (Echo for now)
+    printf("[POST Data] %s\n", body);
+
+    char response[1024];
+    int resp_len = snprintf(response, sizeof(response), 
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: text/plain\r\n"
+        "Content-Length: %d\r\n"
+        "\r\n"
+        "Received: %s",
+        (int)(10 + strlen(body)), body); // "Received: " is 10 chars
+
+    send_all(client_socket, response, resp_len);
+    log_request(client_addr, "POST", path, 200);
+    free(body);
+}
+
 void *handle_client(void *arg) {
     ClientInfo *cinfo = (ClientInfo *) arg;
     int client_socket = cinfo->socket;
@@ -175,6 +248,8 @@ void *handle_client(void *arg) {
 
         if (strcmp(method, "GET") == 0) {
             serve_file(client_socket, &client_addr, path);
+        } else if (strcmp(method, "POST") == 0) {
+            handle_post_request(client_socket, &client_addr, path, buffer, bytes);
         } else {
             const char *bad = "HTTP/1.1 405 Method Not Allowed\r\n"
                                "Connection: keep-alive\r\n"
