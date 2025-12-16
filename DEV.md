@@ -75,3 +75,15 @@ int remaining = body_len - already_read;
 
 // recv loop for remaining bytes...
 ```
+
+### File System & Directory Listing
+
+To serve files or list directory contents, the server interacts with the operating system's file system using specific system calls.
+
+1.  **stat()**: Used to determine the status of a file path. It tells us if a path exists and whether it is a regular file (`S_ISREG`) or a directory (`S_ISDIR`).
+2.  **opendir() / readdir() / closedir()**: These functions allow the program to iterate over the contents of a directory.
+    -   `opendir` opens a directory stream.
+    -   `readdir` returns the next entry in the directory (a `struct dirent`), which contains the filename.
+
+#### Dynamic Content Generation
+When listing a directory, the server **dynamically generates** an HTML page. Instead of reading a static file from disk, it constructs a string containing the HTML structure (e.g., `<ul><li><a href="...">filename</a></li>...</ul>`) and sends that as the response body.

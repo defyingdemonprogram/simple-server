@@ -7,6 +7,8 @@
 #include <sys/socket.h>
 #include <string.h>
 #include <ctype.h>
+#include <sys/stat.h>
+#include <dirent.h>
 
 #include "logging.h"
 #define PORT 6969
@@ -96,6 +98,53 @@ static int send_all(int sock, const void *buf, size_t len) {
     return 0;
 }
 
+static void serve_directory(int client_socket, const char *path, const char *full_path) {
+    DIR *d;
+    struct dirent *dir;
+    d = opendir(full_path);
+    if (!d) {
+        perror("opendir");
+        // Fallback to 404 or 403
+        return;
+    }
+
+    char body[1024 * 16]; // 16KB buffer for directory listing
+    strcpy(body, "<html><head><title>Directory Listing</title></head><body>");
+    strcat(body, "<h1>Directory Listing</h1><ul>");
+
+    while ((dir = readdir(d)) != NULL) {
+        if (strcmp(dir->d_name, ".") == 0) continue;
+        
+        char line[1024];
+        // Ensure we handle root path correctly for links
+        const char *prefix = (strcmp(path, "/") == 0) ? "" : path;
+        // Should ideally escape quotes etc.
+        snprintf(line, sizeof(line), "<li><a href=\"%s/%s\">%s</a></li>", prefix, dir->d_name, dir->d_name);
+        
+        // Simple buffer check
+        if (strlen(body) + strlen(line) < sizeof(body) - 50) {
+            strcat(body, line);
+        } else {
+            strcat(body, "<li>... truncated ...</li>");
+            break;
+        }
+    }
+    closedir(d);
+
+    strcat(body, "</ul></body></html>");
+
+    char header[256];
+    snprintf(header, sizeof(header),
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: text/html\r\n"
+        "Content-Length: %ld\r\n"
+        "Connection: keep-alive\r\n"
+        "\r\n",
+        strlen(body));
+
+    send_all(client_socket, header, strlen(header));
+    send_all(client_socket, body, strlen(body));
+}
 
 void serve_file(int client_socket, struct sockaddr_in *client_addr, const char *raw_path) {
     char decoded[256];
@@ -115,19 +164,42 @@ void serve_file(int client_socket, struct sockaddr_in *client_addr, const char *
 
     char full_path[512];
     if (strcmp(raw_path, "/") == 0) {
-        snprintf(full_path, sizeof(full_path), "./public/index.html");
+        snprintf(full_path, sizeof(full_path), "./public");
     } else {
         snprintf(full_path, sizeof(full_path), "./public/%s", path);
     }
 
-    FILE *file = fopen(full_path, "rb");
-    if (!file) {
+    struct stat st;
+    if (stat(full_path, &st) < 0) {
+         // File not found
         const char *not_found = 
             "HTTP/1.1 404 Not Found\r\n"
             "Content-Type: text/html\r\n\r\n"
             "<h1>404 - File Not Found</h1>";
         send_all(client_socket, not_found, strlen(not_found));
         log_request(client_addr, "GET", raw_path, 404);
+        return;
+    }
+
+    if (S_ISDIR(st.st_mode)) {
+        // Check for index.html
+        char index_path[1024];
+        snprintf(index_path, sizeof(index_path), "%s/index.html", full_path);
+        if (stat(index_path, &st) == 0) {
+            // index.html exists, serve it
+            strcpy(full_path, index_path);
+        } else {
+            // Serve directory listing
+            serve_directory(client_socket, raw_path, full_path);
+            log_request(client_addr, "GET", raw_path, 200);
+            return;
+        }
+    }
+
+    FILE *file = fopen(full_path, "rb");
+    if (!file) {
+        // Should have been caught by stat, but race condition or permission possible
+        perror("fopen");
         return;
     }
 
