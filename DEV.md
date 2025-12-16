@@ -102,3 +102,13 @@ Creating a thread for every single request (`pthread_create` per client) is expe
 3.  The main thread accepts connections and pushes them into the queue.
 4.  A worker wakes up, processes the request, and goes back to waiting.
 This limits the resource usage and provides predictable performance.
+
+### File I/O and Configuration
+
+Most real-world software needs to be configurable without recompiling. This is typically done using configuration files.
+In C, specific functions are used for file input/output operations:
+-   **fopen()**: Opens a file and returns a file pointer (`FILE *`).
+-   **fgets()**: Reads a line from the file into a buffer.
+-   **fclose()**: Closes the file, releasing resources.
+
+**Parsing**: Once a line is read (e.g., `PORT=8080`), string manipulation functions like `strchr` (to find the `=`) or `sscanf` are used to extract the key and value.

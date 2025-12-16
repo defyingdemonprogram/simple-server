@@ -11,8 +11,41 @@
 #include <dirent.h>
 
 #include "logging.h"
-#define PORT 6969
 #define BUFFER_SIZE (4*1024)
+#define THREAD_POOL_SIZE 8
+#define QUEUE_SIZE 256
+
+int SERVER_PORT = 6969;
+char SERVER_ROOT[256] = "./public";
+
+void load_config(const char *filename) {
+    FILE *file = fopen(filename, "r");
+    if (!file) {
+        printf("Config file not found, using defaults.\n");
+        return;
+    }
+
+    char line[256];
+    while (fgets(line, sizeof(line), file)) {
+        // Remove newline
+        line[strcspn(line, "\n")] = 0;
+        
+        char *eq = strchr(line, '=');
+        if (eq) {
+            *eq = 0; // split key and value
+            char *key = line;
+            char *value = eq + 1;
+            
+            if (strcmp(key, "PORT") == 0) {
+                SERVER_PORT = atoi(value);
+            } else if (strcmp(key, "ROOT_DIR") == 0) {
+                strncpy(SERVER_ROOT, value, sizeof(SERVER_ROOT) - 1);
+            }
+        }
+    }
+    fclose(file);
+    printf("Loaded Config: PORT=%d, ROOT=%s\n", SERVER_PORT, SERVER_ROOT);
+}
 
 // Helper to get Content-Length case-insensitively
 static long get_content_length(const char *headers) {
@@ -27,18 +60,13 @@ static long get_content_length(const char *headers) {
     return 0;
 }
 
-#define PORT 6969
-#define BUFFER_SIZE (4*1024)
-#define THREAD_POOL_SIZE 8
-#define QUEUE_SIZE 256
-
 typedef struct {
     int socket;
     struct sockaddr_in addr;
 } ClientInfo;
 
 typedef struct {
-    void (*function)(void *);
+    void *(*function)(void *);
     void *arg;
 } Task;
 
@@ -187,9 +215,9 @@ void serve_file(int client_socket, struct sockaddr_in *client_addr, const char *
 
     char full_path[512];
     if (strcmp(raw_path, "/") == 0) {
-        snprintf(full_path, sizeof(full_path), "./public");
+        snprintf(full_path, sizeof(full_path), "%s", SERVER_ROOT);
     } else {
-        snprintf(full_path, sizeof(full_path), "./public/%s", path);
+        snprintf(full_path, sizeof(full_path), "%s/%s", SERVER_ROOT, path);
     }
 
     struct stat st;
@@ -365,6 +393,8 @@ void *handle_client(void *arg) {
 
 
 int main() {
+    load_config("server.conf");
+
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (server_fd < 0) {
         perror("socket");
@@ -379,7 +409,7 @@ int main() {
     struct sockaddr_in server_addr = {
         .sin_family = AF_INET,
         .sin_addr.s_addr = INADDR_ANY,
-        .sin_port = htons(PORT)
+        .sin_port = htons(SERVER_PORT)
     };
 
     if (bind(server_fd, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
@@ -393,7 +423,10 @@ int main() {
     }
 
     print_sockaddr(&server_addr);
-    printf("Server running on http://localhost:%d\n", PORT);
+    print_sockaddr(&server_addr);
+    printf("Server running on http://localhost:%d\n", SERVER_PORT);
+
+    // Fix: Move load_config to top of main.
 
     init_thread_pool();
 
@@ -413,7 +446,7 @@ int main() {
         cinfo->addr = client_addr;
 
         Task task;
-        task.function = (void (*)(void *))handle_client;
+        task.function = handle_client;
         task.arg = cinfo;
 
         submit_task(task);
