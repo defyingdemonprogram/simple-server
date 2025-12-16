@@ -17,6 +17,21 @@ typedef struct {
     struct sockaddr_in addr;
 } ClientInfo;
 
+static int should_close_connection(const char *req) {
+    // Case-insensitive search
+    const char *p = req;
+    while(*p) {
+        if (strncasecmp(p, "Connection:", 11)==0) {
+            p += 11;
+            while (*p == ' ') p++;
+            if (strncasecmp(p, "close", 5)==0)
+                return 1;
+        }
+        p++;
+    }
+    return 0; // keep-alive by default
+}
+
 static int url_decode(char *dst, const char *src, size_t max) {
     size_t i = 0, j = 0;
     while (src[i] && j < max - 1) {
@@ -115,7 +130,9 @@ void serve_file(int client_socket, struct sockaddr_in *client_addr, const char *
     snprintf(header, sizeof(header),
         "HTTP/1.1 200 OK\r\n"
         "Content-Type: %s\r\n"
-        "Content-Length: %ld\r\n\r\n",
+        "Content-Length: %ld\r\n"
+        "Connection: keep-alive\r\n"
+        "\r\n",
         mime, size);
 
     send_all(client_socket, header, strlen(header));
@@ -136,21 +153,38 @@ void *handle_client(void *arg) {
     struct sockaddr_in client_addr = cinfo->addr;
 
     char buffer[BUFFER_SIZE];
-    int bytes = recv(client_socket, buffer, BUFFER_SIZE - 1, 0);
-    if (bytes > 0) {
+    while(1) {
+        int bytes = recv(client_socket, buffer, BUFFER_SIZE - 1, 0);
+        if (bytes <= 0) {
+            break; // client closed or error
+        }
+
         buffer[bytes] = '\0';
 
         char method[10], path[256];
         if (sscanf(buffer, "%9s %255s", method, path) != 2) {
-            const char *bad = "HTTP/1.1 400 Bad Request\r\n\r\n";
+            const char *bad = "HTTP/1.1 400 Bad Request\r\n"
+                              "Connection: close\r\n"
+                              "\r\n";
             send_all(client_socket, bad, strlen(bad));
-            log_request(&client_addr, method, path, 400);
-        } else if (strcmp(method, "GET") == 0) {
+            log_request(&client_addr, "UNKNOWN", "UNKNOWN", 400);
+            break;
+        }
+
+        int close_conn = should_close_connection(buffer);
+
+        if (strcmp(method, "GET") == 0) {
             serve_file(client_socket, &client_addr, path);
         } else {
-            const char *bad = "HTTP/1.1 405 Method Not Allowed\r\n\r\n";
+            const char *bad = "HTTP/1.1 405 Method Not Allowed\r\n"
+                               "Connection: keep-alive\r\n"
+                               "\r\n";
             send_all(client_socket, bad, strlen(bad));
             log_request(&client_addr, method, path, 405);
+        }
+
+        if (close_conn) {
+            break;
         }
     }
 
