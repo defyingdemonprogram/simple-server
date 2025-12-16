@@ -7,13 +7,13 @@ A minimal HTTP server written in C that uses low-level UNIX sockets to serve sta
 1. **Build the project**
 
 ```bash
-./build.sh
+make
 ```
 
 2. **Run the server**
 
 ```bash
-./server
+./bin/server
 ```
 
 3. **Access the server**

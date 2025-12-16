@@ -1,3 +1,5 @@
 server
 access.log
 del.c
+bin/
+obj/
